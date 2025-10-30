@@ -250,115 +250,258 @@ async def get_creator_stats(wallet_address: str, db: Session = Depends(get_db)):
 # --------------------------------------------------------------------
 # 💳 PURCHASES ENDPOINTS
 # --------------------------------------------------------------------
-@app.post("/api/purchase/", response_model=PurchaseInitResponse)
-async def initiate_purchase(purchase_data: PurchaseCreate, db: Session = Depends(get_db)):
+@app.post("/", response_model=PurchaseInitResponse)
+async def initiate_purchase(
+    purchase_data: PurchaseCreate,
+    db: Session = Depends(get_db)
+):
+    """
+    Initiate a purchase - creates transaction data for frontend to sign
+    """
+    # Validate wallet address
     if not is_valid_solana_address(purchase_data.buyer_wallet):
-        raise HTTPException(400, "Invalid buyer wallet address")
-
-    listing = db.query(Listing).filter(Listing.id == purchase_data.listing_id, Listing.is_active == True).first()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid buyer wallet address"
+        )
+    
+    # Get listing
+    listing = db.query(Listing).filter(
+        Listing.id == purchase_data.listing_id,
+        Listing.is_active == True
+    ).first()
+    
     if not listing:
-        raise HTTPException(404, "Listing not found or inactive")
-
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Listing not found or inactive"
+        )
+    
+    # Check if already purchased
     existing_purchase = db.query(Purchase).filter(
         Purchase.listing_id == purchase_data.listing_id,
         Purchase.buyer_wallet == purchase_data.buyer_wallet,
         Purchase.status == TransactionStatus.CONFIRMED
     ).first()
+    
     if existing_purchase:
-        raise HTTPException(409, "You already own this artwork")
-
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="You already own this artwork"
+        )
+    
+    # Ensure buyer exists
     buyer = db.query(User).filter(User.wallet_address == purchase_data.buyer_wallet).first()
     if not buyer:
-        buyer = User(wallet_address=purchase_data.buyer_wallet, role=UserRole.BUYER)
+        buyer = User(
+            wallet_address=purchase_data.buyer_wallet,
+            role=UserRole.BUYER
+        )
         db.add(buyer)
         db.commit()
-
-    transaction_data = await solana_service.create_transfer_transaction(
-        from_wallet=purchase_data.buyer_wallet,
-        to_wallet=listing.creator_wallet,
-        amount_sol=listing.price_sol
-    )
-
-    if gateway_service.enabled:
-        priority_fee = await gateway_service.get_priority_fee_estimate()
-        transaction_data = await gateway_service.optimize_transaction(transaction_data, priority_fee)
-
-    return PurchaseInitResponse(transaction_data=transaction_data, listing=listing, amount_sol=listing.price_sol)
-
-
-@app.post("/api/purchase/confirm", response_model=PurchaseResponse)
-async def confirm_purchase(confirm_data: PurchaseConfirm, db: Session = Depends(get_db)):
-    listing = db.query(Listing).filter(Listing.id == confirm_data.listing_id).first()
-    if not listing:
-        raise HTTPException(404, "Listing not found")
-
-    existing = db.query(Purchase).filter(Purchase.transaction_signature == confirm_data.transaction_signature).first()
-    if existing and existing.status == TransactionStatus.CONFIRMED:
-        return existing
-
-    is_valid = await solana_service.verify_transaction(
-        signature=confirm_data.transaction_signature,
-        expected_sender=confirm_data.buyer_wallet,
-        expected_receiver=listing.creator_wallet,
-        expected_amount_sol=listing.price_sol
-    )
-    if not is_valid:
-        raise HTTPException(400, "Transaction verification failed")
-
-    if existing:
-        existing.status = TransactionStatus.CONFIRMED
-        existing.confirmed_at = datetime.utcnow()
-        db.commit()
-        db.refresh(existing)
-        return existing
-    else:
-        new_purchase = Purchase(
-            listing_id=confirm_data.listing_id,
-            buyer_wallet=confirm_data.buyer_wallet,
-            transaction_signature=confirm_data.transaction_signature,
-            amount_sol=listing.price_sol,
-            status=TransactionStatus.CONFIRMED,
-            confirmed_at=datetime.utcnow()
+    
+    try:
+        # Create Solana transfer transaction
+        transaction_data = await solana_service.create_transfer_transaction(
+            from_wallet=purchase_data.buyer_wallet,
+            to_wallet=listing.creator_wallet,
+            amount_sol=listing.price_sol
         )
-        db.add(new_purchase)
-        db.commit()
-        db.refresh(new_purchase)
-        return new_purchase
+        
+        # Use Sanctum Gateway for optimization if enabled
+        from backend.services.gateway_service import gateway_service
+        if gateway_service.enabled:
+            # Get priority fee recommendation
+            priority_fee = await gateway_service.get_priority_fee_estimate()
+            if priority_fee:
+                transaction_data['priority_fee'] = priority_fee
+                transaction_data['optimized'] = True
+        
+        return PurchaseInitResponse(
+            transaction_data=transaction_data,
+            listing=listing,
+            amount_sol=listing.price_sol
+        )
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create transaction: {str(e)}"
+        )
 
+@app.post("/confirm", response_model=PurchaseResponse)
+async def confirm_purchase(
+    confirm_data: PurchaseConfirm,
+    db: Session = Depends(get_db)
+):
+    """
+    Confirm purchase after transaction is signed and sent
+    Verifies the transaction on-chain
+    """
+    # Get listing
+    listing = db.query(Listing).filter(Listing.id == confirm_data.listing_id).first()
+    
+    if not listing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Listing not found"
+        )
+    
+    # Check if transaction signature already used
+    existing = db.query(Purchase).filter(
+        Purchase.transaction_signature == confirm_data.transaction_signature
+    ).first()
+    
+    if existing:
+        if existing.status == TransactionStatus.CONFIRMED:
+            return existing
+        elif existing.status == TransactionStatus.PENDING:
+            # Re-verify if still pending
+            pass
+    
+    try:
+        # Verify transaction on-chain
+        is_valid = await solana_service.verify_transaction(
+            signature=confirm_data.transaction_signature,
+            expected_sender=confirm_data.buyer_wallet,
+            expected_receiver=listing.creator_wallet,
+            expected_amount_sol=listing.price_sol
+        )
+        
+        if not is_valid:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Transaction verification failed. Please ensure transaction is confirmed on-chain."
+            )
+        
+        # Create or update purchase record
+        if existing:
+            existing.status = TransactionStatus.CONFIRMED
+            existing.confirmed_at = datetime.utcnow()
+            db.commit()
+            db.refresh(existing)
+            return existing
+        else:
+            new_purchase = Purchase(
+                listing_id=confirm_data.listing_id,
+                buyer_wallet=confirm_data.buyer_wallet,
+                transaction_signature=confirm_data.transaction_signature,
+                amount_sol=listing.price_sol,
+                status=TransactionStatus.CONFIRMED,
+                confirmed_at=datetime.utcnow()
+            )
+            
+            db.add(new_purchase)
+            db.commit()
+            db.refresh(new_purchase)
+            
+            return new_purchase
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Create pending purchase for retry
+        if not existing:
+            pending_purchase = Purchase(
+                listing_id=confirm_data.listing_id,
+                buyer_wallet=confirm_data.buyer_wallet,
+                transaction_signature=confirm_data.transaction_signature,
+                amount_sol=listing.price_sol,
+                status=TransactionStatus.PENDING
+            )
+            db.add(pending_purchase)
+            db.commit()
+        
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to verify transaction: {str(e)}"
+        )
 
-@app.get("/api/purchase/unlocked/{buyer_wallet}", response_model=List[UnlockedContent])
-async def get_unlocked_content(buyer_wallet: str, db: Session = Depends(get_db)):
+@app.get("/unlocked/{buyer_wallet}", response_model=List[UnlockedContent])
+async def get_unlocked_content(
+    buyer_wallet: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Get all unlocked artwork for a buyer
+    Returns full IPFS URLs for purchased items
+    """
     if not is_valid_solana_address(buyer_wallet):
-        raise HTTPException(400, "Invalid wallet address")
-
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid wallet address"
+        )
+    
+    # Get all confirmed purchases for this buyer
     purchases = db.query(Purchase).join(Listing).filter(
         Purchase.buyer_wallet == buyer_wallet,
         Purchase.status == TransactionStatus.CONFIRMED
     ).all()
+    
+    unlocked = []
+    for purchase in purchases:
+        # Handle both ipfs_url and file_url (for different storage backends)
+        file_url = getattr(purchase.listing, 'ipfs_url', None) or getattr(purchase.listing, 'file_url', None)
+        ipfs_hash = getattr(purchase.listing, 'ipfs_hash', None) or purchase.listing.id
+        
+        unlocked.append(UnlockedContent(
+            listing_id=purchase.listing.id,
+            title=purchase.listing.title,
+            ipfs_url=file_url,
+            ipfs_hash=ipfs_hash,
+            purchased_at=purchase.confirmed_at or purchase.purchased_at
+        ))
+    
+    return unlocked
 
-    return [
-        UnlockedContent(
-            listing_id=p.listing.id,
-            title=p.listing.title,
-            file_url=p.listing.file_url,
-            purchased_at=p.confirmed_at or p.purchased_at
-        )
-        for p in purchases
-    ]
-
-
-@app.get("/api/purchase/history/{wallet_address}", response_model=List[PurchaseResponse])
-async def get_purchase_history(wallet_address: str, skip: int = 0, limit: int = 50, db: Session = Depends(get_db)):
+@app.get("/history/{wallet_address}", response_model=List[PurchaseResponse])
+async def get_purchase_history(
+    wallet_address: str,
+    skip: int = 0,
+    limit: int = 50,
+    db: Session = Depends(get_db)
+):
+    """
+    Get purchase history for a wallet (as buyer)
+    """
     if not is_valid_solana_address(wallet_address):
-        raise HTTPException(400, "Invalid wallet address")
-
-    return db.query(Purchase).filter(
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid wallet address"
+        )
+    
+    purchases = db.query(Purchase).filter(
         Purchase.buyer_wallet == wallet_address
     ).order_by(Purchase.purchased_at.desc()).offset(skip).limit(limit).all()
+    
+    return purchases
 
-
-@app.get("/api/purchase/verify/{transaction_signature}")
+@app.get("/verify/{transaction_signature}")
 async def verify_transaction_status(transaction_signature: str):
+    """
+    Check the status of a transaction
+    """
+    try:
+        status = await solana_service.get_transaction_status(transaction_signature)
+        
+        if gateway_service.enabled:
+            gateway_status = await gateway_service.get_transaction_status(transaction_signature)
+            return {
+                "signature": transaction_signature,
+                "solana_status": status,
+                "gateway_status": gateway_status
+            }
+        
+        return {
+            "signature": transaction_signature,
+            "status": status
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to check transaction status: {str(e)}"
+        )
     try:
         status_ = await solana_service.get_transaction_status(transaction_signature)
         if gateway_service.enabled:
