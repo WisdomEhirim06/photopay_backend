@@ -250,7 +250,7 @@ async def get_creator_stats(wallet_address: str, db: Session = Depends(get_db)):
 # --------------------------------------------------------------------
 # 💳 PURCHASES ENDPOINTS
 # --------------------------------------------------------------------
-@app.post("/", response_model=PurchaseInitResponse)
+@app.post("/api/purchases/", response_model=PurchaseInitResponse)
 async def initiate_purchase(
     purchase_data: PurchaseCreate,
     db: Session = Depends(get_db)
@@ -324,7 +324,7 @@ async def initiate_purchase(
             detail=f"Failed to create transaction: {str(e)}"
         )
 
-@app.post("/confirm", response_model=PurchaseResponse)
+@app.post("/api/purchase/confirm", response_model=PurchaseResponse)
 async def confirm_purchase(
     confirm_data: PurchaseConfirm,
     db: Session = Depends(get_db)
@@ -411,7 +411,7 @@ async def confirm_purchase(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to verify transaction: {str(e)}"
         )
-@app.get("/unlocked/{buyer_wallet}", response_model=List[UnlockedContent])
+@app.get("/api/purchase/unlocked/{buyer_wallet}", response_model=List[UnlockedContent])
 async def get_unlocked_content(
     buyer_wallet: str,
     db: Session = Depends(get_db)
@@ -449,7 +449,7 @@ async def get_unlocked_content(
     return unlocked
 
 
-@app.get("/history/{wallet_address}", response_model=List[PurchaseResponse])
+@app.get("/api/purchase/history/{wallet_address}", response_model=List[PurchaseResponse])
 async def get_purchase_history(
     wallet_address: str,
     skip: int = 0,
@@ -471,7 +471,7 @@ async def get_purchase_history(
     
     return purchases
 
-@app.get("/verify/{transaction_signature}")
+@app.get("/api/purchase/verify/{transaction_signature}")
 async def verify_transaction_status(transaction_signature: str):
     """
     Check the status of a transaction
