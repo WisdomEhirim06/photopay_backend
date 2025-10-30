@@ -1,0 +1,30 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.log
+
+# Virtual environments
+.venv/
+env/
+venv/
+
+# OS files
+.DS_Store
+
+# Local SQLite DB
+*.db
+
+# Environment files
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# Build
+build/
+dist/
+*.egg-info/
+
+credentials
+gcs-credentials.json/
