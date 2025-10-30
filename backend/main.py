@@ -301,21 +301,16 @@ async def initiate_purchase(
         db.commit()
     
     try:
-        # Create Solana transfer transaction
         transaction_data = await solana_service.create_transfer_transaction(
             from_wallet=purchase_data.buyer_wallet,
             to_wallet=listing.creator_wallet,
             amount_sol=listing.price_sol
         )
         
-        # Use Sanctum Gateway for optimization if enabled
+        # Apply Sanctum Gateway optimization
         from backend.services.gateway_service import gateway_service
-        if gateway_service.enabled:
-            # Get priority fee recommendation
-            priority_fee = await gateway_service.get_priority_fee_estimate()
-            if priority_fee:
-                transaction_data['priority_fee'] = priority_fee
-                transaction_data['optimized'] = True
+        priority_fee = await gateway_service.get_priority_fee_estimate()
+        transaction_data = await gateway_service.optimize_transaction(transaction_data, priority_fee)
         
         return PurchaseInitResponse(
             transaction_data=transaction_data,
@@ -416,7 +411,6 @@ async def confirm_purchase(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to verify transaction: {str(e)}"
         )
-
 @app.get("/unlocked/{buyer_wallet}", response_model=List[UnlockedContent])
 async def get_unlocked_content(
     buyer_wallet: str,
@@ -441,18 +435,19 @@ async def get_unlocked_content(
     unlocked = []
     for purchase in purchases:
         # Handle both ipfs_url and file_url (for different storage backends)
-        file_url = getattr(purchase.listing, 'file_url', None) or getattr(purchase.listing, 'file_url', None)
-        file_id = getattr(purchase.listing, 'file_id', None) or purchase.listing.id
+        file_url = getattr(purchase.listing, 'ipfs_url', None) or getattr(purchase.listing, 'file_url', None)
+        ipfs_hash = getattr(purchase.listing, 'ipfs_hash', None) or purchase.listing.id
         
         unlocked.append(UnlockedContent(
             listing_id=purchase.listing.id,
             title=purchase.listing.title,
-            file_url=file_url,
-            fie_id=file_id,
+            ipfs_url=file_url,
+            ipfs_hash=ipfs_hash,
             purchased_at=purchase.confirmed_at or purchase.purchased_at
         ))
     
     return unlocked
+
 
 @app.get("/history/{wallet_address}", response_model=List[PurchaseResponse])
 async def get_purchase_history(
@@ -502,15 +497,6 @@ async def verify_transaction_status(transaction_signature: str):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to check transaction status: {str(e)}"
         )
-    try:
-        status_ = await solana_service.get_transaction_status(transaction_signature)
-        if gateway_service.enabled:
-            gateway_status = await gateway_service.get_transaction_status(transaction_signature)
-            return {"signature": transaction_signature, "solana_status": status_, "gateway_status": gateway_status}
-        return {"signature": transaction_signature, "status": status_}
-    except Exception as e:
-        raise HTTPException(500, f"Failed to check transaction status: {str(e)}")
-
 # --------------------------------------------------------------------
 # 🏠 ROOT & HEALTH
 # --------------------------------------------------------------------
