@@ -441,14 +441,14 @@ async def get_unlocked_content(
     unlocked = []
     for purchase in purchases:
         # Handle both ipfs_url and file_url (for different storage backends)
-        file_url = getattr(purchase.listing, 'ipfs_url', None) or getattr(purchase.listing, 'file_url', None)
-        ipfs_hash = getattr(purchase.listing, 'ipfs_hash', None) or purchase.listing.id
+        file_url = getattr(purchase.listing, 'file_url', None) or getattr(purchase.listing, 'file_url', None)
+        file_id = getattr(purchase.listing, 'file_id', None) or purchase.listing.id
         
         unlocked.append(UnlockedContent(
             listing_id=purchase.listing.id,
             title=purchase.listing.title,
-            ipfs_url=file_url,
-            ipfs_hash=ipfs_hash,
+            file_url=file_url,
+            fie_id=file_id,
             purchased_at=purchase.confirmed_at or purchase.purchased_at
         ))
     
