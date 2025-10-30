@@ -250,7 +250,7 @@ async def get_creator_stats(wallet_address: str, db: Session = Depends(get_db)):
 # --------------------------------------------------------------------
 # 💳 PURCHASES ENDPOINTS
 # --------------------------------------------------------------------
-@app.post("/api/purchases/", response_model=PurchaseInitResponse)
+@app.post("/api/purchase/", response_model=PurchaseInitResponse)
 async def initiate_purchase(
     purchase_data: PurchaseCreate,
     db: Session = Depends(get_db)
